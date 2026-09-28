@@ -266,6 +266,174 @@ const handler = createMcpHandler(
     );
 
     server.tool(
+      "get_contact_notes",
+      "Get all notes for a HighLevel contact. Read-only. Useful for understanding salesperson context, objections, timing, project details, and prior follow-up.",
+      { contactId: z.string().min(1) },
+      async ({ contactId }) =>
+        asText(await ghl(`/contacts/${encodeURIComponent(contactId)}/notes`)),
+    );
+
+    server.tool(
+      "get_contact_tasks",
+      "Get all tasks for a HighLevel contact. Read-only. Useful for seeing promised follow-ups, overdue actions, and ownership.",
+      { contactId: z.string().min(1) },
+      async ({ contactId }) =>
+        asText(await ghl(`/contacts/${encodeURIComponent(contactId)}/tasks`)),
+    );
+
+    server.tool(
+      "get_contact_appointments",
+      "Get all appointments for a HighLevel contact. Read-only. Useful for confirming prior meetings, site visits, presentations, and appointment status.",
+      { contactId: z.string().min(1) },
+      async ({ contactId }) =>
+        asText(await ghl(`/contacts/${encodeURIComponent(contactId)}/appointments`)),
+    );
+
+    server.tool(
+      "search_contact_opportunities",
+      "Get all opportunities tied to one contact across pipelines, including task, note, and calendar-event context returned by HighLevel. Read-only.",
+      { contactId: z.string().min(1) },
+      async ({ contactId }) => {
+        const locationId = requireEnv(LOCATION_ID_ENV);
+        const qs = new URLSearchParams({
+          locationId,
+          contactId,
+          status: "all",
+          limit: "100",
+          getTasks: "true",
+          getNotes: "true",
+          getCalendarEvents: "true",
+        });
+        return asText(await ghl(`/opportunities/search?${qs.toString()}`));
+      },
+    );
+
+    server.tool(
+      "search_contact_conversations",
+      "Find conversation threads for a HighLevel contact. Read-only. Use with get_conversation_messages for full SMS/email/call history.",
+      { contactId: z.string().min(1) },
+      async ({ contactId }) => {
+        const locationId = requireEnv(LOCATION_ID_ENV);
+        const qs = new URLSearchParams({
+          locationId,
+          contactId,
+          sort: "desc",
+          limit: "100",
+        });
+        return asText(await ghl(`/conversations/search?${qs.toString()}`));
+      },
+    );
+
+    server.tool(
+      "get_conversation_messages",
+      "Get messages and activity from a HighLevel conversation thread. Read-only. Includes supported SMS, email, call, social, and CRM activity message types.",
+      {
+        conversationId: z.string().min(1),
+        limit: z.number().int().min(1).max(100).default(100),
+        lastMessageId: z.string().optional(),
+      },
+      async ({ conversationId, limit, lastMessageId }) => {
+        const qs = new URLSearchParams({ limit: String(limit) });
+        if (lastMessageId) qs.set("lastMessageId", lastMessageId);
+        return asText(await ghl(
+          `/conversations/${encodeURIComponent(conversationId)}/messages?${qs.toString()}`,
+        ));
+      },
+    );
+
+    server.tool(
+      "get_contact_custom_field_definitions",
+      "Get contact custom-field definitions for the configured HighLevel sub-account. Read-only. Helps interpret custom field IDs and values found on a contact.",
+      {},
+      async () => {
+        const locationId = requireEnv(LOCATION_ID_ENV);
+        return asText(await ghl(
+          `/locations/${encodeURIComponent(locationId)}/customFields?model=contact`,
+        ));
+      },
+    );
+
+    server.tool(
+      "get_user",
+      "Get a HighLevel user by user ID. Read-only. Useful for resolving assignedTo and note author IDs to actual team members.",
+      { userId: z.string().min(1) },
+      async ({ userId }) =>
+        asText(await ghl(`/users/${encodeURIComponent(userId)}`)),
+    );
+
+    server.tool(
+      "deep_research_contact",
+      "Run a comprehensive read-only CRM research pull for one contact: contact record, notes, tasks, appointments, all opportunities, conversation threads, and recent messages. Designed for lead reactivation research and prioritization.",
+      {
+        contactId: z.string().min(1),
+        messagesPerConversation: z.number().int().min(1).max(100).default(100),
+        maxConversations: z.number().int().min(1).max(20).default(10),
+      },
+      async ({ contactId, messagesPerConversation, maxConversations }) => {
+        const locationId = requireEnv(LOCATION_ID_ENV);
+
+        const [contact, notes, tasks, appointments, opportunities, conversations] =
+          await Promise.all([
+            ghl(`/contacts/${encodeURIComponent(contactId)}`),
+            ghl(`/contacts/${encodeURIComponent(contactId)}/notes`),
+            ghl(`/contacts/${encodeURIComponent(contactId)}/tasks`),
+            ghl(`/contacts/${encodeURIComponent(contactId)}/appointments`),
+            ghl(`/opportunities/search?${new URLSearchParams({
+              locationId,
+              contactId,
+              status: "all",
+              limit: "100",
+              getTasks: "true",
+              getNotes: "true",
+              getCalendarEvents: "true",
+            }).toString()}`),
+            ghl(`/conversations/search?${new URLSearchParams({
+              locationId,
+              contactId,
+              sort: "desc",
+              limit: "100",
+            }).toString()}`),
+          ]);
+
+        const conversationList = Array.isArray((conversations as any)?.conversations)
+          ? (conversations as any).conversations
+          : Array.isArray((conversations as any)?.results)
+            ? (conversations as any).results
+            : [];
+
+        const selected = conversationList.slice(0, maxConversations);
+        const messageThreads = await Promise.all(
+          selected.map(async (conversation: any) => {
+            const conversationId = conversation?.id;
+            if (!conversationId) return { conversation, messages: null };
+            try {
+              const messages = await ghl(
+                `/conversations/${encodeURIComponent(conversationId)}/messages?${new URLSearchParams({
+                  limit: String(messagesPerConversation),
+                }).toString()}`,
+              );
+              return { conversation, messages };
+            } catch (error) {
+              return { conversation, messagesError: String(error) };
+            }
+          }),
+        );
+
+        return asText({
+          contactId,
+          researchedAt: new Date().toISOString(),
+          contact,
+          notes,
+          tasks,
+          appointments,
+          opportunities,
+          conversations,
+          messageThreads,
+        });
+      },
+    );
+
+    server.tool(
       "update_contact_reactivation_fields",
       "Update selected non-destructive contact fields used for reactivation, such as assignment or approved custom-field values. Does not replace tags, change DND, or modify attribution/source.",
       {
