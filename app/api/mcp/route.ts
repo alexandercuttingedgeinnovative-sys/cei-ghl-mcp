@@ -150,14 +150,35 @@ function unauthorized() {
   });
 }
 
+// ChatGPT must be able to initialize the MCP session and discover tool schemas
+// before a user credential is attached. These methods expose no CRM data and
+// perform no actions. Actual tool execution remains protected.
+const DISCOVERY_METHODS = new Set([
+  "initialize",
+  "notifications/initialized",
+  "tools/list",
+  "ping",
+]);
+
 export async function GET(req: Request) {
-  if (!authorized(req)) return unauthorized();
+  // GET is used by some MCP clients for transport/session setup and exposes no
+  // HighLevel data by itself.
   return handler(req);
 }
 
 export async function POST(req: Request) {
-  if (!authorized(req)) return unauthorized();
-  return handler(req);
+  if (authorized(req)) return handler(req);
+
+  try {
+    const payload = await req.clone().json();
+    if (payload && DISCOVERY_METHODS.has(payload.method)) {
+      return handler(req);
+    }
+  } catch {
+    // Fall through to unauthorized.
+  }
+
+  return unauthorized();
 }
 
 export async function DELETE(req: Request) {
